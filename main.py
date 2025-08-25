@@ -1,104 +1,99 @@
-from fastapi import FastAPI, HTTPException, Depends, Body
-from sqlmodel import SQLModel, Field, create_engine, Session, select
-from typing import Optional
-from contextlib import asynccontextmanager
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from database import Base, engine, SessionLocal
+import models
+import schemas
+import crud
 
-# ---------- Database ----------
-DATABASE_URL = "sqlite:///students.db"
-engine = create_engine(DATABASE_URL, echo=True)
+Base.metadata.create_all(bind=engine)
 
-class Student(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str
-    age: int
+app = FastAPI(title="School REST API", version="1.0")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "name": "Ali",
-                "age": 20
-            }
-        }
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def create_db_and_tables():
-    SQLModel.metadata.create_all(engine)
+@app.post("/departments", response_model=schemas.DepartmentOut)
+def create_department(payload: schemas.DepartmentCreate, db: Session = Depends(get_db)):
+    exists = db.query(models.Department).filter(models.Department.name == payload.name).first()
+    if exists:
+        raise HTTPException(status_code=400, detail="Department with this name already exists")
+    return crud.create_department(db, name=payload.name)
 
-def get_session():
-    with Session(engine) as session:
-        yield session
+@app.get("/departments", response_model=list[schemas.DepartmentOut])
+def list_departments(db: Session = Depends(get_db)):
+    return db.query(models.Department).all()
 
-# ---------- FastAPI App ----------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    create_db_and_tables()
-    yield
+@app.post("/teachers", response_model=schemas.TeacherOut)
+def create_teacher(payload: schemas.TeacherCreate, db: Session = Depends(get_db)):
+    return crud.create_teacher(db, name=payload.name)
 
-app = FastAPI(title="Students CRUD API", lifespan=lifespan)
+@app.get("/departments", response_model=list[schemas.DepartmentOut])
+def list_departments(db: Session = Depends(get_db)):
+    return db.query(models.Department).all()
 
-# ---------- CRUD Endpoints ----------
+@app.post("/teachers", response_model=schemas.TeacherOut)
+def create_teacher(payload: schemas.TeacherCreate, db: Session = Depends(get_db)):
+    return crud.create_teacher(db, name=payload.name)
 
-# CREATE student
-@app.post("/students/", response_model=Student)
-def create_student(
-    student: Student = Body(
-        ...,
-        example={"name": "Ali", "age": 20},
-    
-    ),
-    session: Session = Depends(get_session)
-):
-    session.add(student)
-    session.commit()
-    session.refresh(student)
-    return student
+@app.get("/teachers", response_model=list[schemas.TeacherOut])
+def list_teachers(db: Session = Depends(get_db)):
+    return db.query(models.Teacher).all()
 
-# READ all students
-@app.get("/students/", response_model=list[Student])
-def read_students(session: Session = Depends(get_session)):
-    students = session.exec(select(Student)).all()
-    return students
+@app.post("/courses", response_model=schemas.CourseOut)
+def create_course(payload: schemas.CourseCreate, db: Session = Depends(get_db)):
+    dept = db.query(models.Department).filter(models.Department.id == payload.department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    teacher = None
+    if payload.teacher_id is not None:
+        teacher = db.query(models.Teacher).filter(models.Teacher.id == payload.teacher_id).first()
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher not found")
+    return crud.create_course(db, title=payload.title, department_id=payload.department_id, teacher_id=payload.teacher_id)
 
-# READ one student
-@app.get("/students/{student_id}", response_model=Student)
-def read_student(student_id: int, session: Session = Depends(get_session)):
-    student = session.get(Student, student_id)
+@app.get("/courses", response_model=list[schemas.CourseOut])
+def list_courses(db: Session = Depends(get_db)):
+    return db.query(models.Course).all()
+
+@app.post("/students", response_model=schemas.StudentOut)
+def create_student(payload: schemas.StudentCreate, db: Session = Depends(get_db)):
+    return crud.create_student(db, name=payload.name)
+
+@app.get("/students", response_model=list[schemas.StudentOut])
+def list_students(db: Session = Depends(get_db)):
+    return db.query(models.Student).all()
+
+@app.post("/enrollments")
+def enroll(payload: schemas.EnrollmentCreate, db: Session = Depends(get_db)):
+    student = db.query(models.Student).filter(models.Student.id == payload.student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    return student
+    course = db.query(models.Course).filter(models.Course.id == payload.course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    e = crud.enroll_student(db, student_id=payload.student_id, course_id=payload.course_id, grade=payload.grade)
+    return {"message": "Enrollment saved", "student_id": e.student_id, "course_id": e.course_id, "grade": e.grade}
 
-# UPDATE student
-@app.put("/students/{student_id}", response_model=Student)
-def update_student(
-    student_id: int,
-    updated: Student = Body(
-        ...,
-        example={"name": "Ahmed", "age": 21},
-    ),
-    session: Session = Depends(get_session)
-):
-    student = session.get(Student, student_id)
-    if not student:
+@app.get("/students/{student_id}/courses", response_model=list[schemas.StudentCourseItem])
+def student_courses(student_id: int, db: Session = Depends(get_db)):
+    exists = db.query(models.Student).filter(models.Student.id == student_id).first()
+    if not exists:
         raise HTTPException(status_code=404, detail="Student not found")
+    rows = (
+        db.query(models.Enrollment, models.Course)
+        .join(models.Course, models.Enrollment.course_id == models.Course.id)
+        .filter(models.Enrollment.student_id == student_id)
+        .all()
+    )
+    return [
+        {"course_id": c.id, "title": c.title, "grade": e.grade}
+        for (e, c) in rows
+    ]
 
-    student.name = updated.name
-    student.age = updated.age
-
-    session.add(student)
-    session.commit()
-    session.refresh(student)
-    return student
-
-# DELETE student
-@app.delete("/students/{student_id}")
-def delete_student(student_id: int, session: Session = Depends(get_session)):
-    student = session.get(Student, student_id)
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    session.delete(student)
-    session.commit()
-    return {"message": "Student deleted successfully"}
-
-# Optional root
-@app.get("/")
-def root():
-    return {"message": "Welcome! Use /docs to test the Students CRUD API"}
+@app.get("/courses/{course_id}/students", response_model=list[schemas.CourseStudentItem])
+def course_students(course_id: int, db: Session = Depends(get_db)):
+    exists = db.query(models.Course).filter
