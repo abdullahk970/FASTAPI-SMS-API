@@ -8,8 +8,6 @@ venv/
 .venv/
 
 # Environment variables
-.env
-.env.*
 
 # SQLite databases
 *.db
@@ -17,9 +15,10 @@ venv/
 *.sqlite3
 
 # IDEs
-.vscode/
 .idea/
 
 # OS files
 .DS_Store
 Thumbs.db
+config.bat
+node_modules
